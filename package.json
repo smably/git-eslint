@@ -1,0 +1,36 @@
+{
+  "name": "eslint-delta",
+  "version": "0.1.0",
+  "description": "Filter ESLint output by git diff",
+  "main": "build/index.js",
+  "scripts": {
+    "build": "babel src -d build"
+  },
+  "keywords": [
+    "lint",
+    "eslint"
+  ],
+  "author": "Sylvan Mably",
+  "license": "MIT",
+  "dependencies": {
+    "eslint": "^3.19.0",
+    "minimatch": "^3.0.3",
+    "nodegit": "^0.18.0"
+  },
+  "devDependencies": {
+    "babel-cli": "^6.24.1",
+    "babel-preset-env": "^1.4.0"
+  },
+  "babel": {
+    "presets": [
+      [
+        "env",
+        {
+          "targets": {
+            "node": 4
+          }
+        }
+      ]
+    ]
+  }
+}
