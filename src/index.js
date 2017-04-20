@@ -16,9 +16,12 @@ const ERROR_SEVERITY = 2;
 // Helpers
 //------------------------------------------------------------------------------
 
-function getLines(patch) {
+async function getLines(patch) {
   const flatten = arr => [].concat(...arr);
-  return patch.hunks().then(hunks => Promise.all(hunks.map(hunk => hunk.lines()))).then(flatten);
+  const hunks = await patch.hunks();
+  const hunkLines = await Promise.all(hunks.map(hunk => hunk.lines()));
+
+  return flatten(hunkLines);
 }
 
 function filterResults(results, delta) {
@@ -81,38 +84,25 @@ class DeltaLinter {
     this.eslint = new CLIEngine();
   }
 
-  init(oldRev, newRev) {
-    return Git.Repository
-      .openExt('.', 0, '')
-      .then((repo) => {
-        this.repo = repo;
-      })
-      .then(() => {
-        const revs = { old: oldRev, new: newRev };
+  async init(oldRev, newRev) {
+    this.repo = await Git.Repository.openExt('.', 0, '');
 
-        if (!oldRev && !newRev) {
-          revs.old = 'HEAD'; // No revs passed, so diff HEAD against the index (special logic will handle null case)
-        } else if (!oldRev) {
-          revs.old = 'master'; // Only newRev was passed, so diff master against newRev
-        }
+    const revs = { old: oldRev, new: newRev };
 
-        return Promise.all([this.getCommit(revs.old), this.getCommit(revs.new)]);
-      })
-      .then(([oldCommit, newCommit]) =>
-        Promise.all([this.getBaseCommit(oldCommit, newCommit), Promise.resolve(newCommit || INDEX_COMMIT)]))
-      .then(([oldCommit, newCommit]) => {
-        this.oldCommit = oldCommit;
-        this.newCommit = newCommit;
-      })
-      .then(() =>
-        Promise.all([
-          this.oldCommit.getTree(),
-          this.newCommit === INDEX_COMMIT ? Promise.resolve(INDEX_TREE) : this.newCommit.getTree(),
-        ]))
-      .then(([oldTree, newTree]) => {
-        this.oldTree = oldTree;
-        this.newTree = newTree;
-      });
+    if (!oldRev && !newRev) {
+      revs.old = 'HEAD'; // No revs passed, so diff HEAD against the index (special logic will handle null case)
+    } else if (!oldRev) {
+      revs.old = 'master'; // Only newRev was passed, so diff master against newRev
+    }
+
+    const oldCommit = await this.getCommit(revs.old);
+    const newCommit = await this.getCommit(revs.new);
+
+    this.oldCommit = await this.getBaseCommit(oldCommit, newCommit);
+    this.newCommit = await (newCommit || INDEX_COMMIT);
+
+    this.oldTree = await this.oldCommit.getTree();
+    this.newTree = await (this.newCommit === INDEX_COMMIT ? Promise.resolve(INDEX_TREE) : this.newCommit.getTree());
   }
 
   getCommit(rev) {
