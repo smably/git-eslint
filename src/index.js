@@ -1,3 +1,5 @@
+// @flow
+
 const Git = require('nodegit');
 const CLIEngine = require('eslint').CLIEngine;
 const minimatch = require('minimatch');
