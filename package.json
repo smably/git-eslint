@@ -2,7 +2,7 @@
   "name": "git-eslint",
   "version": "0.1.0",
   "description": "Filter ESLint output by git history",
-  "main": "build/index.js",
+  "main": "build/cli.js",
   "scripts": {
     "build": "babel src -d build",
     "lint": "eslint src/*.js"
