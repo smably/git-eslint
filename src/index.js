@@ -32,14 +32,14 @@ function filterResults(results, delta) {
     filteredWarningCount: 0,
   };
 
-  results.forEach((result) => {
+  results.forEach(result => {
     let filteredErrorCount = 0;
     let filteredWarningCount = 0;
 
     const fileLinesAdded = delta.get(result.filePath);
 
     if (fileLinesAdded !== ALL_LINES) {
-      const filteredMessages = result.messages.filter((message) => {
+      const filteredMessages = result.messages.filter(message => {
         if (fileLinesAdded.has(message.line)) {
           return true;
         }
@@ -99,72 +99,78 @@ class DeltaLinter {
     const newCommit = await this.getCommit(revs.new);
 
     this.oldCommit = await this.getBaseCommit(oldCommit, newCommit);
-    this.newCommit = await (newCommit || INDEX_COMMIT);
+    this.newCommit = (await newCommit) || INDEX_COMMIT;
 
     this.oldTree = await this.oldCommit.getTree();
     this.newTree = await (this.newCommit === INDEX_COMMIT ? Promise.resolve(INDEX_TREE) : this.newCommit.getTree());
   }
 
-  getCommit(rev) {
+  async getCommit(rev) {
     if (!rev) {
-      return Promise.resolve(null);
+      return null;
     }
 
-    return Git.Revparse.single(this.repo, rev).then(revObj => this.repo.getCommit(revObj.id()));
+    const revObj = await Git.Revparse.single(this.repo, rev);
+
+    return this.repo.getCommit(revObj.id());
   }
 
   // Get the merge base (nearest common ancestor) in case this.oldCommit isn't an ancestor of this.newCommit
-  getBaseCommit(oldCommit, newCommit) {
+  async getBaseCommit(oldCommit, newCommit) {
     if (!newCommit) {
       return oldCommit;
     }
 
-    return Git.Merge
-      .base(this.repo, oldCommit.id(), newCommit.id())
-      .then(baseId => (baseId === oldCommit.id() ? oldCommit : this.repo.getCommit(baseId)));
+    const baseId = await Git.Merge.base(this.repo, oldCommit.id(), newCommit.id());
+
+    if (baseId === oldCommit.id()) {
+      return oldCommit;
+    }
+
+    return this.repo.getCommit(baseId);
   }
 
-  getPatches() {
-    const diffPromise = this.newTree === INDEX_TREE
-      ? Git.Diff.treeToIndex(this.repo, this.oldTree)
-      : Git.Diff.treeToTree(this.repo, this.oldTree, this.newTree);
+  async getPatches() {
+    const diff = this.newTree === INDEX_TREE
+      ? await Git.Diff.treeToIndex(this.repo, this.oldTree)
+      : await Git.Diff.treeToTree(this.repo, this.oldTree, this.newTree);
 
-    return diffPromise.then(diff => diff.findSimilar().then(() => diff.patches()));
+    await diff.findSimilar();
+
+    return diff.patches();
   }
 
-  getDelta(fileGlob, countAllLines) {
+  async getDelta(fileGlob, countAllLines) {
     const matchFileGlob = patch => (fileGlob ? minimatch(patch.newFile().path(), fileGlob) : true);
-    const includeAllLines = patch => ({
+    const getAllPatchLines = patch => ({
       filePath: patch.newFile().path(),
       lines: ALL_LINES,
     });
-    const includeChangedLines = patch => new Promise((resolve) => {
-      getLines(patch).then((lines) => {
-        resolve({
-          filePath: patch.newFile().path(),
-          lines,
-        });
-      });
-    });
+    const getModifiedPatchLines = async patch => {
+      const lines = await getLines(patch);
 
-    return this.getPatches().then((patches) => {
-      const matchingPatches = patches.filter(matchFileGlob);
-      const newFilePatches = matchingPatches.filter(patch => patch.isAdded());
-      const modifiedFilePatches = matchingPatches.filter(patch => patch.isModified() || patch.isRenamed());
-      const newFileLines = newFilePatches.map(includeAllLines);
+      return {
+        filePath: patch.newFile().path(),
+        lines,
+      };
+    };
 
-      // If countAllLines flag is passed, skip changed line calculation and include entirety of changed files in delta
-      if (countAllLines) {
-        const modifiedFileLines = modifiedFilePatches.map(includeAllLines);
-        return Promise.resolve(this.processLines(newFileLines.concat(modifiedFileLines)));
-      }
+    const patches = await this.getPatches();
 
-      const fileLinePromises = modifiedFilePatches.map(includeChangedLines);
+    const matchingPatches = patches.filter(matchFileGlob);
+    const newFilePatches = matchingPatches.filter(patch => patch.isAdded());
+    const modifiedFilePatches = matchingPatches.filter(patch => patch.isModified() || patch.isRenamed());
+    const newFileLines = newFilePatches.map(getAllPatchLines);
 
-      return Promise.all(fileLinePromises)
-        .then(modifiedFileLines => newFileLines.concat(modifiedFileLines))
-        .then(files => this.processLines(files));
-    });
+    // If countAllLines flag is passed, skip changed line calculation and include entirety of changed files in delta
+    if (countAllLines) {
+      const modifiedFileLines = modifiedFilePatches.map(getAllPatchLines);
+      return this.processLines(newFileLines.concat(modifiedFileLines));
+    }
+
+    const modifiedFileLines = await Promise.all(modifiedFilePatches.map(getModifiedPatchLines));
+
+    return this.processLines(newFileLines.concat(modifiedFileLines));
   }
 
   processLines(files) {
@@ -172,7 +178,7 @@ class DeltaLinter {
       return null;
     }
 
-    const delta = files.map((file) => {
+    const delta = files.map(file => {
       const absolutePath = path.resolve(this.repo.workdir(), file.filePath);
 
       if (file.lines === ALL_LINES) {
@@ -192,45 +198,50 @@ class DeltaLinter {
   }
 
   hasPartiallyStagedFiles(stagedFiles) {
-    return stagedFiles.some((filePath) => {
+    return stagedFiles.some(filePath => {
       const status = Git.Status.file(this.repo, path.relative(this.repo.workdir(), filePath));
       return (status & Git.Status.STATUS.WT_MODIFIED) !== 0; // eslint-disable-line no-bitwise
     });
   }
 
-  lint(delta) {
+  async lint(delta) {
     const deltaFiles = [...delta.keys()];
-    let resultsPromise;
+    let results;
 
     const getRelativePath = absolutePath => path.relative(this.repo.workdir(), absolutePath);
-    const getBlobText = (id, filePath) => this.repo.getBlob(id).then(blob => [blob.toString(), filePath]);
-    const getLintResults = fileContentsPromise => fileContentsPromise.then((files) => {
+    const getBlobText = async (id, filePath) => {
+      const blob = this.repo.getBlob(id);
+      return [blob.toString(), filePath];
+    };
+    const getLintResults = async fileContentsPromise => {
+      const files = await fileContentsPromise;
       const reports = files.map(file => this.eslint.executeOnText(...file));
       return reports.reduce((partialResults, report) => partialResults.concat(report.results), []);
-    });
+    };
 
     if (this.newTree === INDEX_TREE && !this.hasPartiallyStagedFiles(deltaFiles)) {
       // Simple case: running ESLint on staged files and no changes in the working dir
-      resultsPromise = Promise.resolve(this.eslint.executeOnFiles(deltaFiles).results);
+      results = this.eslint.executeOnFiles(deltaFiles).results;
     } else if (this.newTree === INDEX_TREE) {
-      resultsPromise = getLintResults(
-        this.repo.index().then(index => Promise.all(
-          deltaFiles.map((filePath) => {
-            const indexEntry = index.getByPath(getRelativePath(filePath), 0);
-            return getBlobText(indexEntry.id, filePath);
-          })
-        ))
-      );
+      const index = await this.repo.index();
+      const getFileContents = async filePath => {
+        const indexEntry = await index.getByPath(getRelativePath(filePath), 0);
+        return getBlobText(indexEntry.id, filePath);
+      };
+      const files = await Promise.all(deltaFiles.map(getFileContents));
+
+      results = await getLintResults(files);
     } else {
-      resultsPromise = getLintResults(
-        Promise.all(
-          deltaFiles.map(filePath =>
-            this.newCommit.getEntry(getRelativePath(filePath)).then(entry => getBlobText(entry.id(), filePath)))
-        )
-      );
+      const getFileContents = async filePath => {
+        const entry = await this.newCommit.getEntry(getRelativePath(filePath));
+        return getBlobText(entry.id(), filePath);
+      };
+      const files = await Promise.all(deltaFiles.map(getFileContents));
+
+      results = await getLintResults(files);
     }
 
-    return resultsPromise.then(results => filterResults(results, delta));
+    return filterResults(results, delta);
   }
 }
 
