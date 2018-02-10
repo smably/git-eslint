@@ -9,26 +9,29 @@ const argv = require('yargs')
   .command({
     command: 'commit',
     desc: 'Lint changes from a single commit (HEAD by default)',
-    builder: yargs => yargs.option('r', {
-      alias: 'rev',
-      description: 'A revision identifier corresponding to a commit, as recognized by git rev-parse',
-      default: 'HEAD',
-    }),
+    builder: yargs =>
+      yargs.option('r', {
+        alias: 'rev',
+        description: 'A revision identifier corresponding to a commit, as recognized by git rev-parse',
+        default: 'HEAD',
+      }),
   })
   .command({
     command: 'branch',
     desc: 'Lint changes from the specified revision (HEAD by default), relative to a base branch (master by default)',
-    builder: yargs => yargs
-      .option('b', {
-        alias: 'base',
-        description: 'The identifier of the base revision, as recognized by git rev-parse',
-        default: 'master',
-      })
-      .option('r', {
-        alias: 'rev',
-        description: 'The identifier of the revision to diff against the base revision, as recognized by git rev-parse',
-        default: 'HEAD',
-      }),
+    builder: yargs =>
+      yargs
+        .option('b', {
+          alias: 'base',
+          description: 'The identifier of the base revision, as recognized by git rev-parse',
+          default: 'master',
+        })
+        .option('r', {
+          alias: 'rev',
+          description:
+            'The identifier of the revision to diff against the base revision, as recognized by git rev-parse',
+          default: 'HEAD',
+        }),
   })
   .option('a', {
     alias: 'all',
@@ -82,9 +85,9 @@ function printIgnoreStats(errorCount, warningCount) {
   const command = `${path.relative(process.cwd(), scriptPath)} ${scriptArgs.join(' ')} --all`;
 
   console.log(
-    `Ignored ${errorCountMessage}${warningCountMessage} that ${totalCount === 1
-      ? 'was'
-      : 'were'} found outside the added or modified lines.`
+    `Ignored ${errorCountMessage}${warningCountMessage} that ${
+      totalCount === 1 ? 'was' : 'were'
+    } found outside the added or modified lines.`,
   );
   console.log(`(Run ${command.yellow} to show all errors and warnings.)\n`);
 }
@@ -110,13 +113,14 @@ switch (command) {
     throw new Error(`Unknown command ${command}.`);
 }
 
-const initMessage = command === 'staged'
-  ? 'Linting staged changes...\n'
-  : `Linting changes between ${oldRev.yellow} and ${newRev.yellow}...\n`;
+const initMessage =
+  command === 'staged'
+    ? 'Linting staged changes...\n'
+    : `Linting changes between ${oldRev.yellow} and ${newRev.yellow}...\n`;
 
 dl
   .init(oldRev, newRev)
-  .catch((err) => {
+  .catch(err => {
     console.error('Error while initializing linter:'.red.bold);
     console.error(err);
     process.exit(1);
@@ -125,7 +129,7 @@ dl
     console.log(initMessage);
     return dl.getDelta('**/*.{js,jss,jsx}', argv.all);
   })
-  .then((delta) => {
+  .then(delta => {
     if (delta) {
       console.log(BANNER);
     } else {
@@ -133,7 +137,7 @@ dl
       process.exit(0);
     }
 
-    dl.lint(delta).then((report) => {
+    dl.lint(delta).then(report => {
       const successMessage = '🎉  LINT OK! 🎉'.green.bold;
       const failureMessage = '💩  LINT FAILED! 💩'.red.bold;
 
