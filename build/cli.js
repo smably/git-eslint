@@ -208,6 +208,6 @@ dl.init(oldRev, newRev, findBase).catch(function (err) {
   }).catch(function (err) {
     console.log('Error occurred when trying to lint:');
     console.log(err);
-    process.exit(0);
+    process.exit(1);
   });
 });
