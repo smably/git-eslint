@@ -1,75 +1,118 @@
 // @flow
 
-const Git = require('nodegit');
-const CLIEngine = require('eslint').CLIEngine;
-const minimatch = require('minimatch');
-const path = require('path');
+import Git from 'nodegit';
+import { CLIEngine } from 'eslint';
+import minimatch from 'minimatch';
+import path from 'path';
 
-const ALL_LINES = Symbol('all lines');
+type LineSpec = { allLines: boolean, lineSet: Set<number> };
+type Delta = Map<string, LineSpec>;
 
-const INDEX_COMMIT = Symbol('index commit');
-const INDEX_TREE = Symbol('index tree');
+const ALL_LINES: LineSpec = {
+  allLines: true,
+  lineSet: new Set(),
+};
 
 // For some reason ESLint doesn't provide these as constants :(
 const WARNING_SEVERITY = 1;
 const ERROR_SEVERITY = 2;
 
+export type Rev = {
+  id: ?string,
+  isWorkdir?: boolean,
+  isIndex?: boolean,
+};
+
+export const HEAD: Rev = { id: 'HEAD' };
+export const INDEX: Rev = { id: null, isIndex: true };
+export const WORKDIR: Rev = { id: null, isWorkdir: true };
+
 //------------------------------------------------------------------------------
 // Helpers
 //------------------------------------------------------------------------------
 
-async function getLines(patch) {
+async function getLinesAdded(patch: Git.ConvenientPatch) {
   const flatten = arr => [].concat(...arr);
   const hunks = await patch.hunks();
   const hunkLines = await Promise.all(hunks.map(hunk => hunk.lines()));
+  const lines = flatten(hunkLines);
+  const addedLineNumbers = lines.filter(line => line.oldLineno() < 0).map(line => line.newLineno());
 
-  return flatten(hunkLines);
+  return {
+    allLines: false,
+    lineSet: new Set(addedLineNumbers),
+  };
 }
 
-function filterResults(results, delta) {
+function filterResults(results, delta: Delta) {
   const totals = {
     errorCount: 0,
     warningCount: 0,
     filteredErrorCount: 0,
     filteredWarningCount: 0,
+    filteredFixableErrorCount: 0,
+    filteredFixableWarningCount: 0,
   };
 
-  results.forEach(result => {
+  const filteredResults = results.map(fileResult => {
     let filteredErrorCount = 0;
     let filteredWarningCount = 0;
+    let filteredFixableErrorCount = 0;
+    let filteredFixableWarningCount = 0;
 
-    const fileLinesAdded = delta.get(result.filePath);
+    const fileLinesAdded = delta.get(fileResult.filePath);
 
-    if (fileLinesAdded !== ALL_LINES) {
-      const filteredMessages = result.messages.filter(message => {
-        if (fileLinesAdded.has(message.line)) {
-          return true;
-        }
-
-        if (message.severity === WARNING_SEVERITY) {
-          filteredWarningCount++;
-        } else if (message.severity === ERROR_SEVERITY) {
-          filteredErrorCount++;
-        }
-
-        return false;
-      });
-
-      /* eslint-disable no-param-reassign */
-      result.messages = filteredMessages;
-      result.errorCount -= filteredErrorCount;
-      result.warningCount -= filteredWarningCount;
-      /* eslint-enable no-param-reassign */
+    if (fileLinesAdded == null) {
+      throw new Error(`Fatal: missing lint results for file ${fileResult.filePath}`);
     }
 
-    totals.errorCount += result.errorCount;
-    totals.warningCount += result.warningCount;
+    const isAddedLine = message => {
+      if (fileLinesAdded.lineSet.has(message.line)) {
+        return true;
+      }
+
+      if (message.severity === WARNING_SEVERITY) {
+        filteredWarningCount++;
+
+        if (message.fix) {
+          filteredFixableWarningCount++;
+        }
+      } else if (message.severity === ERROR_SEVERITY) {
+        filteredErrorCount++;
+
+        if (message.fix) {
+          filteredFixableErrorCount++;
+        }
+      }
+
+      return false;
+    };
+
+    const messages = fileLinesAdded === ALL_LINES ? fileResult.messages : fileResult.messages.filter(isAddedLine);
+    const errorCount = fileResult.errorCount - filteredErrorCount;
+    const warningCount = fileResult.warningCount - filteredWarningCount;
+    const fixableErrorCount = fileResult.fixableErrorCount - filteredFixableErrorCount;
+    const fixableWarningCount = fileResult.fixableWarningCount - filteredFixableWarningCount;
+
+    totals.errorCount += errorCount;
+    totals.warningCount += warningCount;
     totals.filteredErrorCount += filteredErrorCount;
     totals.filteredWarningCount += filteredWarningCount;
+    totals.filteredFixableErrorCount += filteredFixableErrorCount;
+    totals.filteredFixableWarningCount += filteredFixableWarningCount;
+
+    return {
+      ...fileResult,
+      messages,
+      errorCount,
+      warningCount,
+      fixableErrorCount,
+      fixableWarningCount,
+    };
   });
 
   return {
-    results,
+    results: filteredResults,
     errorCount: totals.errorCount,
     warningCount: totals.warningCount,
     filteredErrorCount: totals.filteredErrorCount,
@@ -80,45 +123,53 @@ function filterResults(results, delta) {
 //------------------------------------------------------------------------------
 // Main class
 //------------------------------------------------------------------------------
+export default class DeltaLinter {
+  eslint: CLIEngine;
+  repo: Git.Repository;
+  oldRev: Rev;
+  newRev: Rev;
+  oldCommit: Git.Commit;
+  newCommit: ?Git.Commit;
+  oldTree: Git.Tree;
+  newTree: ?Git.Tree;
 
-class DeltaLinter {
   constructor() {
     this.eslint = new CLIEngine();
   }
 
-  async init(oldRev, newRev) {
+  async init(oldRev: ?Rev, newRev: Rev, findBase: boolean) {
+    if (oldRev != null && oldRev.id == null) {
+      throw new Error('Old rev did not contain a valid rev ID.');
+    }
+
+    if (oldRev == null && newRev.id == null) {
+      throw new Error('Single rev provided did not contain a valid rev ID.');
+    }
+
+    // Use ~ to get the parent of the new rev if the old rev is not set (handles the `show rev` case)
+    this.oldRev = oldRev || { ...newRev, id: `${newRev.id || ''}~` };
+    this.newRev = newRev;
+
     this.repo = await Git.Repository.openExt('.', 0, '');
 
-    const revs = { old: oldRev, new: newRev };
+    const oldCommit = await this.getCommit(this.oldRev.id || ''); // TODO is there a cleaner way to satisfy flow than falling bock to the empty string?
+    const newCommit = newRev.id ? await this.getCommit(newRev.id) : null;
 
-    if (!oldRev && !newRev) {
-      revs.old = 'HEAD'; // No revs passed, so diff HEAD against the index (special logic will handle null case)
-    } else if (!oldRev) {
-      revs.old = 'master'; // Only newRev was passed, so diff master against newRev
-    }
-
-    const oldCommit = await this.getCommit(revs.old);
-    const newCommit = await this.getCommit(revs.new);
-
-    this.oldCommit = await this.getBaseCommit(oldCommit, newCommit);
-    this.newCommit = (await newCommit) || INDEX_COMMIT;
+    this.oldCommit = findBase ? await this.getBaseCommit(oldCommit, newCommit) : oldCommit;
+    this.newCommit = newCommit;
 
     this.oldTree = await this.oldCommit.getTree();
-    this.newTree = await (this.newCommit === INDEX_COMMIT ? Promise.resolve(INDEX_TREE) : this.newCommit.getTree());
+    this.newTree = this.newCommit ? await this.newCommit.getTree() : null;
   }
 
-  async getCommit(rev) {
-    if (!rev) {
-      return null;
-    }
-
+  async getCommit(rev: string) {
     const revObj = await Git.Revparse.single(this.repo, rev);
 
     return this.repo.getCommit(revObj.id());
   }
 
   // Get the merge base (nearest common ancestor) in case this.oldCommit isn't an ancestor of this.newCommit
-  async getBaseCommit(oldCommit, newCommit) {
+  async getBaseCommit(oldCommit: Git.Commit, newCommit: ?Git.Commit) {
     if (!newCommit) {
       return oldCommit;
     }
@@ -132,29 +183,36 @@ class DeltaLinter {
     return this.repo.getCommit(baseId);
   }
 
-  async getPatches() {
-    const diff = this.newTree === INDEX_TREE
-      ? await Git.Diff.treeToIndex(this.repo, this.oldTree)
-      : await Git.Diff.treeToTree(this.repo, this.oldTree, this.newTree);
+  getDiff() {
+    if (this.newRev.isWorkdir) {
+      return Git.Diff.treeToWorkdir(this.repo, this.oldTree);
+    }
 
+    if (this.newRev.isIndex) {
+      return Git.Diff.treeToIndex(this.repo, this.oldTree);
+    }
+
+    return Git.Diff.treeToTree(this.repo, this.oldTree, this.newTree);
+  }
+
+  async getPatches() {
+    const diff = await this.getDiff();
     await diff.findSimilar();
 
     return diff.patches();
   }
 
-  async getDelta(fileGlob, countAllLines) {
+  async getDelta(fileGlob: string, countAllLines: boolean) {
     const matchFileGlob = patch => (fileGlob ? minimatch(patch.newFile().path(), fileGlob) : true);
-    const getAllPatchLines = patch => ({
+    const getAllPatchLines = (patch: Git.ConvenientPatch) => ({
       filePath: patch.newFile().path(),
       lines: ALL_LINES,
     });
-    const getModifiedPatchLines = async patch => {
-      const lines = await getLines(patch);
+    const getAddedPatchLines = async (patch: Git.ConvenientPatch) => {
+      const filePath = patch.newFile().path();
+      const lines = await getLinesAdded(patch);
 
-      return {
-        filePath: patch.newFile().path(),
-        lines,
-      };
+      return { filePath, lines };
     };
 
     const patches = await this.getPatches();
@@ -170,26 +228,21 @@ class DeltaLinter {
       return this.processLines(newFileLines.concat(modifiedFileLines));
     }
 
-    const modifiedFileLines = await Promise.all(modifiedFilePatches.map(getModifiedPatchLines));
+    const modifiedFileLines: { filePath: string, lines: LineSpec }[] = await Promise.all(
+      modifiedFilePatches.map(getAddedPatchLines),
+    );
 
     return this.processLines(newFileLines.concat(modifiedFileLines));
   }
 
-  processLines(files) {
+  processLines(files: { filePath: string, lines: LineSpec }[]): ?Delta {
     if (files.length === 0) {
       return null;
     }
 
     const delta = files.map(file => {
       const absolutePath = path.resolve(this.repo.workdir(), file.filePath);
-
-      if (file.lines === ALL_LINES) {
-        return [absolutePath, ALL_LINES];
-      }
-
-      const fileLinesAdded = new Set(file.lines.filter(line => line.oldLineno() < 0).map(line => line.newLineno()));
-
-      return [absolutePath, fileLinesAdded];
+      return [absolutePath, file.lines];
     });
 
     return new Map(delta);
@@ -199,52 +252,79 @@ class DeltaLinter {
     return this.eslint.getFormatter();
   }
 
-  hasPartiallyStagedFiles(stagedFiles) {
+  hasPartiallyStagedFiles(stagedFiles: string[]) {
     return stagedFiles.some(filePath => {
       const status = Git.Status.file(this.repo, path.relative(this.repo.workdir(), filePath));
-      return (status & Git.Status.STATUS.WT_MODIFIED) !== 0; // eslint-disable-line no-bitwise
+
+      /* eslint-disable no-bitwise */
+      const hasStagedChanges = (status & Git.Status.STATUS.INDEX_MODIFIED) !== 0;
+      const hasUnstagedChanges = (status & Git.Status.STATUS.WT_MODIFIED) !== 0;
+      /* eslint-enable no-bitwise */
+
+      return hasStagedChanges && hasUnstagedChanges;
     });
   }
 
-  async lint(delta) {
-    const deltaFiles = [...delta.keys()];
-    let results;
-
+  async lintFiles(deltaFiles: string[]) {
     const getRelativePath = absolutePath => path.relative(this.repo.workdir(), absolutePath);
     const getBlobText = async (id, filePath) => {
-      const blob = this.repo.getBlob(id);
+      const blob = await this.repo.getBlob(id);
       return [blob.toString(), filePath];
     };
-    const getLintResults = async fileContentsPromise => {
-      const files = await fileContentsPromise;
-      const reports = files.map(file => this.eslint.executeOnText(...file));
+    const getLintResults = async (fileContents: [string, string][]) => {
+      const reports = fileContents.map(([fileText, filePath]) => this.eslint.executeOnText(fileText, filePath));
       return reports.reduce((partialResults, report) => partialResults.concat(report.results), []);
     };
 
-    if (this.newTree === INDEX_TREE && !this.hasPartiallyStagedFiles(deltaFiles)) {
-      // Simple case: running ESLint on staged files and no changes in the working dir
-      results = this.eslint.executeOnFiles(deltaFiles).results;
-    } else if (this.newTree === INDEX_TREE) {
-      const index = await this.repo.index();
-      const getFileContents = async filePath => {
-        const indexEntry = await index.getByPath(getRelativePath(filePath), 0);
-        return getBlobText(indexEntry.id, filePath);
-      };
-      const files = await Promise.all(deltaFiles.map(getFileContents));
+    const deltaHasPartiallyStagedFiles = this.hasPartiallyStagedFiles(deltaFiles);
 
-      results = await getLintResults(files);
-    } else {
-      const getFileContents = async filePath => {
-        const entry = await this.newCommit.getEntry(getRelativePath(filePath));
-        return getBlobText(entry.id(), filePath);
-      };
-      const files = await Promise.all(deltaFiles.map(getFileContents));
-
-      results = await getLintResults(files);
+    if ((this.newRev.isIndex || this.newRev.isWorkdir) && !deltaHasPartiallyStagedFiles) {
+      // Simple case: no partially staged files, so we can run ESLint directly on the filesystem
+      const { results } = this.eslint.executeOnFiles(deltaFiles);
+      return results;
     }
+
+    if (this.newRev.isIndex) {
+      // Fallback case: running with --staged when there are partially staged files (need to get the file content from the index)
+      const index = await this.repo.index();
+
+      const getFileContents = filePath => {
+        const indexEntry = index.getByPath(getRelativePath(filePath), 0);
+        return indexEntry ? getBlobText(indexEntry.id, filePath) : null;
+      };
+
+      const files = await Promise.all(deltaFiles.map(getFileContents).filter(Boolean));
+
+      return getLintResults(files);
+    }
+
+    if (this.newRev.isWorkdir) {
+      // Really tough case: running ESLint without --staged when there are partially staged files
+      // Need to do something like:
+      //  * do a Diff.indexToWorkdir to get a diff of the changes in the index
+      //  * apply the diff... in reverse? to the file contents in the index to reconstruct the unstaged changes
+      // For now, bail out with an informative error
+      throw new Error("Not yet implemented: can't run diff with partially staged changes.");
+    }
+
+    const getFileContents = async filePath => {
+      if (this.newCommit == null) {
+        throw new Error('Expected new commit to be non-null');
+      }
+
+      const entry = await this.newCommit.getEntry(getRelativePath(filePath));
+      return getBlobText(entry.id(), filePath);
+    };
+
+    const files = await Promise.all(deltaFiles.map(getFileContents));
+
+    return getLintResults(files);
+  }
+
+  async lint(delta: Delta) {
+    const deltaFiles = [...delta.keys()];
+    const results = await this.lintFiles(deltaFiles);
 
     return filterResults(results, delta);
   }
 }
-
-module.exports = DeltaLinter;

@@ -1,73 +1,71 @@
 #!/usr/bin/env node
 
-const argv = require('yargs')
-  .usage('Usage: $0 <staged|commit|branch>')
+// @flow
+/* eslint-disable no-console */
+
+import path from 'path';
+import yargs from 'yargs';
+import colors from 'colors/safe';
+
+import DeltaLinter, { HEAD, INDEX, WORKDIR } from './index';
+import type { Rev } from './index';
+
+type DiffSpec = {
+  oldRev?: Rev,
+  newRev: Rev,
+  findBase: boolean,
+};
+
+/*
+
+  Base support: show
+    - git-eslint show
+    - git-eslint show <commit>
+
+  Base support: diff (** should we handle --no-index?)
+    - git-eslint diff [-- <path>]
+    - git-eslint diff --cached [-- <path>]
+    - git-eslint diff <commit> [-- <path>]
+    - git-eslint diff <commit> <commit> [-- <path>]
+    - git-eslint diff <commit>..<commit> [-- <path>]
+    - git-eslint diff <commit>...<commit> [-- <path>]
+
+  Future enhancement: add an '--ext' option (like eslint) to override file extensions
+
+*/
+
+const FILE_EXTENSIONS = ['.js', '.jsx'];
+
+const { argv } = yargs
+  .usage('Usage: $0 <show|diff> [commit]')
+  .command('show [commit]', 'show lint errors introduced in a commit')
   .command({
-    command: 'staged',
-    desc: 'Lint staged changes',
-  })
-  .command({
-    command: 'commit',
-    desc: 'Lint changes from a single commit (HEAD by default)',
-    builder: yargs =>
-      yargs.option('r', {
-        alias: 'rev',
-        description: 'A revision identifier corresponding to a commit, as recognized by git rev-parse',
-        default: 'HEAD',
-      }),
-  })
-  .command({
-    command: 'branch',
-    desc: 'Lint changes from the specified revision (HEAD by default), relative to a base branch (master by default)',
-    builder: yargs =>
-      yargs
-        .option('b', {
-          alias: 'base',
-          description: 'The identifier of the base revision, as recognized by git rev-parse',
-          default: 'master',
-        })
-        .option('r', {
-          alias: 'rev',
-          description:
-            'The identifier of the revision to diff against the base revision, as recognized by git rev-parse',
-          default: 'HEAD',
-        }),
+    command: 'diff [commits..]',
+    desc: 'show lint errors introduced between commits or in the working dir',
+    builder: y => y.option('cached').option('staged'),
   })
   .option('a', {
     alias: 'all',
     desc: 'Show all violations for modified files (not just violations from changed lines)',
     boolean: true,
   })
-  .option('hook', {
-    desc: 'Run as as Git hook (use exit status to indicate lint result)',
+  .option('debug', {
+    desc: 'Print debug messages',
     boolean: true,
   })
   .demandCommand(1)
   .strict()
   .help('h')
-  .alias('h', 'help').argv;
-
-require('colors'); // no need to assign it to anything as it extends String.prototype
-const DeltaLinter = require('./DeltaLinter');
-const path = require('path');
-
-const BANNER = `
-  ███████╗███████╗██╗     ██╗███╗   ██╗████████╗
-  ██╔════╝██╔════╝██║     ██║████╗  ██║╚══██╔══╝
-  █████╗  ███████╗██║     ██║██╔██╗ ██║   ██║
-  ██╔══╝  ╚════██║██║     ██║██║╚██╗██║   ██║
-  ███████╗███████║███████╗██║██║ ╚████║   ██║
-  ╚══════╝╚══════╝╚══════╝╚═╝╚═╝  ╚═══╝   ╚═╝
-`;
+  .alias('h', 'help');
 
 function printIgnoreStats(errorCount, warningCount) {
   let errorCountMessage = '';
   let warningCountMessage = '';
 
   if (errorCount === 1) {
-    errorCountMessage += '1 error'.red;
+    errorCountMessage += colors.red.bold('1 error');
   } else if (errorCount > 1) {
-    errorCountMessage += `${errorCount} errors`.red;
+    errorCountMessage += colors.red.bold(`${errorCount} errors`);
   }
 
   if (errorCount && warningCount) {
@@ -75,9 +73,9 @@ function printIgnoreStats(errorCount, warningCount) {
   }
 
   if (warningCount === 1) {
-    warningCountMessage += ' 1 warning'.yellow;
+    warningCountMessage += colors.yellow(' 1 warning');
   } else if (warningCount > 1) {
-    warningCountMessage += ` ${warningCount} warnings`.yellow;
+    warningCountMessage += colors.yellow(` ${warningCount} warnings`);
   }
 
   const totalCount = errorCount + warningCount;
@@ -89,80 +87,104 @@ function printIgnoreStats(errorCount, warningCount) {
       totalCount === 1 ? 'was' : 'were'
     } found outside the added or modified lines.`,
   );
-  console.log(`(Run ${command.yellow} to show all errors and warnings.)\n`);
+  console.log(`(Run ${colors.yellow(command)} to show all errors and warnings.)\n`);
+}
+
+function getRevIDs([arg1, arg2]) {
+  if (arg1.includes('...')) {
+    const [oldRevID, newRevID] = arg1.split('...');
+    return { oldRevID, newRevID, findBase: true };
+  }
+
+  if (arg1.includes('..')) {
+    const [oldRevID, newRevID] = arg1.split('..');
+    return { oldRevID, newRevID, findBase: false };
+  }
+
+  return { oldRevID: arg1, newRevID: arg2, findBase: false };
+}
+
+function getRevs(command): DiffSpec {
+  // Diff with at least one commit arg
+  if (command === 'diff') {
+    const { commits } = argv;
+
+    if (Array.isArray(commits)) {
+      const { oldRevID, newRevID, findBase } = getRevIDs(commits);
+
+      const oldRev: Rev = { id: oldRevID };
+      const newRev: Rev = newRevID ? { id: newRevID } : HEAD;
+
+      return { oldRev, newRev, findBase };
+    }
+
+    // Diff with no commits specified
+    return {
+      oldRev: HEAD,
+      newRev: argv.cached || argv.staged ? INDEX : WORKDIR,
+      findBase: false,
+    };
+  }
+
+  if (command === 'show') {
+    const { commit } = argv;
+    const newRev: Rev = commit ? { id: commit } : HEAD;
+
+    return { newRev, findBase: false };
+  }
+
+  throw new Error(`Unknown command ${command}.`);
 }
 
 const [command] = argv._;
+const { oldRev, newRev, findBase } = getRevs(command);
+
+const { debug } = argv;
 
 const dl = new DeltaLinter();
-let oldRev, newRev;
-
-switch (command) {
-  case 'staged':
-    oldRev = 'HEAD';
-    break;
-  case 'commit':
-    oldRev = `${argv.rev}~`;
-    newRev = argv.rev;
-    break;
-  case 'branch':
-    oldRev = argv.base;
-    newRev = argv.rev;
-    break;
-  default:
-    throw new Error(`Unknown command ${command}.`);
-}
-
-const initMessage =
-  command === 'staged'
-    ? 'Linting staged changes...\n'
-    : `Linting changes between ${oldRev.yellow} and ${newRev.yellow}...\n`;
 
 dl
-  .init(oldRev, newRev)
+  .init(oldRev, newRev, findBase)
   .catch(err => {
-    console.error('Error while initializing linter:'.red.bold);
+    console.error(colors.red.bold('Error while initializing linter:'));
     console.error(err);
     process.exit(1);
   })
   .then(() => {
-    console.log(initMessage);
-    return dl.getDelta('**/*.{js,jss,jsx}', argv.all);
+    if (debug) {
+      console.log('OldRev:', oldRev);
+      console.log('NewRev:', newRev);
+      console.log('FindBase:', findBase);
+    }
+    return dl.getDelta(`**/*{${FILE_EXTENSIONS.join(',')}}`, argv.all);
   })
   .then(delta => {
-    if (delta) {
-      console.log(BANNER);
-    } else {
-      console.log('Nothing to lint!');
+    if (!delta) {
       process.exit(0);
+      return;
     }
 
-    dl.lint(delta).then(report => {
-      const successMessage = '🎉  LINT OK! 🎉'.green.bold;
-      const failureMessage = '💩  LINT FAILED! 💩'.red.bold;
-
-      if (report.errorCount + report.warningCount === 0) {
-        console.log();
-        console.log(successMessage);
-        process.exit(0);
-      }
-
-      const formatter = dl.getFormatter();
-      console.log(formatter(report.results));
-
-      if (report.filteredErrorCount + report.filteredWarningCount > 0) {
-        printIgnoreStats(report.filteredErrorCount, report.filteredWarningCount);
-      }
-
-      const hasErrors = report.errorCount > 0;
-      if (hasErrors) {
-        console.log(failureMessage);
-
-        if (command === 'branch' && argv.hook) {
-          console.log('\n☞  You will not be able to merge this branch until you fix the errors above.'.yellow);
+    dl
+      .lint(delta)
+      .then(report => {
+        if (report.errorCount + report.warningCount === 0) {
+          process.exit(0);
         }
 
-        process.exit(argv.hook ? 1 : 0);
-      }
-    });
+        const formatter = dl.getFormatter();
+        console.log(formatter(report.results));
+
+        if (report.filteredErrorCount + report.filteredWarningCount > 0) {
+          printIgnoreStats(report.filteredErrorCount, report.filteredWarningCount);
+        }
+
+        if (report.errorCount > 0) {
+          process.exit(1);
+        }
+      })
+      .catch(err => {
+        console.log('Error occurred when trying to lint:');
+        console.log(err);
+        process.exit(0);
+      });
   });
