@@ -2,9 +2,13 @@
   "name": "git-eslint",
   "version": "0.1.0",
   "description": "Filter ESLint output by git history",
-  "main": "build/cli.js",
+  "main": "build/index.js",
+  "bin": {
+    "git-eslint": "./build/cli.js"
+  },
   "scripts": {
-    "build": "babel src -d build",
+    "build": "babel src --out-dir build",
+    "build:watch": "npm run build -- --watch",
     "flow": "flow",
     "lint": "eslint src/*.js",
     "prepare": "npm run build"
@@ -17,13 +21,18 @@
   "author": "Sylvan Mably",
   "license": "MIT",
   "dependencies": {
+    "babel-runtime": "^6.26.0",
+    "colors": "^1.1.2",
     "eslint": "^4.18.1",
     "minimatch": "^3.0.4",
-    "nodegit": "^0.20.3"
+    "nodegit": "^0.20.3",
+    "yargs": "^11.0.0"
   },
   "devDependencies": {
     "babel-cli": "^6.26.0",
     "babel-eslint": "^8.2.2",
+    "babel-plugin-transform-object-rest-spread": "^6.26.0",
+    "babel-plugin-transform-runtime": "^6.23.0",
     "babel-preset-env": "^1.6.1",
     "babel-preset-flow": "^6.23.0",
     "eslint-config-airbnb-base": "^12.1.0",
@@ -32,7 +41,7 @@
     "eslint-plugin-import": "^2.9.0",
     "eslint-plugin-prettier": "^2.6.0",
     "flow-bin": "^0.66.0",
-    "prettier": "^1.10.2"
+    "prettier": "^1.11.0"
   },
   "babel": {
     "presets": [
@@ -45,6 +54,10 @@
         }
       ],
       "flow"
+    ],
+    "plugins": [
+      "transform-object-rest-spread",
+      "transform-runtime"
     ]
   }
 }
