@@ -127,7 +127,7 @@ var HEAD = exports.HEAD = { id: 'HEAD' };
 var INDEX = exports.INDEX = { id: null, isIndex: true };
 var WORKDIR = exports.WORKDIR = { id: null, isWorkdir: true };
 
-function filterResults(results, delta) {
+function filterResults(oldResults, newResults, delta) {
   var totals = {
     errorCount: 0,
     warningCount: 0,
@@ -137,17 +137,24 @@ function filterResults(results, delta) {
     filteredFixableWarningCount: 0
   };
 
-  var filteredResults = results.map(function (fileResult) {
-    var filteredErrorCount = 0;
-    var filteredWarningCount = 0;
-    var filteredFixableErrorCount = 0;
-    var filteredFixableWarningCount = 0;
-
+  var filteredResults = newResults.map(function (fileResult) {
     var fileLinesAdded = delta.get(fileResult.filePath);
+    var oldFileResult = oldResults.find(function (o) {
+      return o.filePath === fileResult.filePath;
+    });
 
     if (fileLinesAdded == null) {
       throw new Error(`Fatal: missing lint results for file ${fileResult.filePath}`);
     }
+
+    if (oldFileResult == null) {
+      throw new Error(`Fatal: couldn't find file in old lint results ${fileResult.filePath}`);
+    }
+
+    var filteredErrors = [];
+    var filteredWarnings = [];
+    var filteredFixableErrorCount = 0;
+    var filteredFixableWarningCount = 0;
 
     var isAddedLine = function isAddedLine(message) {
       if (fileLinesAdded.lineSet.has(message.line)) {
@@ -155,13 +162,13 @@ function filterResults(results, delta) {
       }
 
       if (message.severity === WARNING_SEVERITY) {
-        filteredWarningCount++;
+        filteredWarnings.push(message);
 
         if (message.fix) {
           filteredFixableWarningCount++;
         }
       } else if (message.severity === ERROR_SEVERITY) {
-        filteredErrorCount++;
+        filteredErrors.push(message);
 
         if (message.fix) {
           filteredFixableErrorCount++;
@@ -172,15 +179,55 @@ function filterResults(results, delta) {
     };
 
     var messages = fileLinesAdded === ALL_LINES ? fileResult.messages : fileResult.messages.filter(isAddedLine);
-    var errorCount = fileResult.errorCount - filteredErrorCount;
-    var warningCount = fileResult.warningCount - filteredWarningCount;
+
+    var isSameProblem = function isSameProblem(message1, message2) {
+      return message1.ruleId === message2.ruleId && message1.source === message2.source && message1.column === message2.column;
+    };
+
+    var oldErrors = filteredErrors.filter(function (filteredError) {
+      if (!oldFileResult.messages.find(function (message) {
+        return isSameProblem(message, filteredError);
+      })) {
+        messages.push(filteredError);
+
+        if (filteredError.fix) {
+          filteredFixableErrorCount--;
+        }
+
+        return false;
+      }
+
+      return true;
+    });
+
+    var oldWarnings = filteredWarnings.filter(function (filteredWarning) {
+      if (!oldFileResult.messages.find(function (message) {
+        return isSameProblem(message, filteredWarning);
+      })) {
+        messages.push(filteredWarning);
+
+        if (filteredWarning.fix) {
+          filteredFixableWarningCount--;
+        }
+
+        return false;
+      }
+
+      return true;
+    });
+
+    var oldErrorCount = oldErrors.length;
+    var oldWarningCount = oldWarnings.length;
+
+    var errorCount = fileResult.errorCount - oldErrorCount;
+    var warningCount = fileResult.warningCount - oldWarningCount;
     var fixableErrorCount = fileResult.fixableErrorCount - filteredFixableErrorCount;
     var fixableWarningCount = fileResult.fixableWarningCount - filteredFixableWarningCount;
 
     totals.errorCount += errorCount;
     totals.warningCount += warningCount;
-    totals.filteredErrorCount += filteredErrorCount;
-    totals.filteredWarningCount += filteredWarningCount;
+    totals.filteredErrorCount += oldErrorCount;
+    totals.filteredWarningCount += oldWarningCount;
     totals.filteredFixableErrorCount += filteredFixableErrorCount;
     totals.filteredFixableWarningCount += filteredFixableWarningCount;
 
@@ -597,14 +644,14 @@ var DeltaLinter = function () {
   }, {
     key: 'lintFiles',
     value: function () {
-      var _ref9 = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee11(deltaFiles) {
+      var _ref9 = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee12(deltaFiles) {
         var _this4 = this;
 
-        var getRelativePath, getBlobText, getLintResults, deltaHasPartiallyStagedFiles, _eslint$executeOnFile, results, index, _getFileContents, _files, getFileContents, files;
+        var getRelativePath, getBlobText, getLintResults, deltaHasPartiallyStagedFiles, _eslint$executeOnFile, results, index, getFileContents, files, _results, getOldFileContents, getNewFileContents, oldFiles, newFiles;
 
-        return _regenerator2.default.wrap(function _callee11$(_context11) {
+        return _regenerator2.default.wrap(function _callee12$(_context12) {
           while (1) {
-            switch (_context11.prev = _context11.next) {
+            switch (_context12.prev = _context12.next) {
               case 0:
                 getRelativePath = function getRelativePath(absolutePath) {
                   return _path2.default.relative(_this4.repo.workdir(), absolutePath);
@@ -671,70 +718,67 @@ var DeltaLinter = function () {
                 deltaHasPartiallyStagedFiles = this.hasPartiallyStagedFiles(deltaFiles);
 
                 if (!((this.newRev.isIndex || this.newRev.isWorkdir) && !deltaHasPartiallyStagedFiles)) {
-                  _context11.next = 7;
+                  _context12.next = 7;
                   break;
                 }
 
                 // Simple case: no partially staged files, so we can run ESLint directly on the filesystem
                 _eslint$executeOnFile = this.eslint.executeOnFiles(deltaFiles), results = _eslint$executeOnFile.results;
-                return _context11.abrupt('return', results);
+                return _context12.abrupt('return', [results, results]);
 
               case 7:
                 if (!this.newRev.isIndex) {
-                  _context11.next = 16;
+                  _context12.next = 19;
                   break;
                 }
 
-                _context11.next = 10;
+                _context12.next = 10;
                 return this.repo.index();
 
               case 10:
-                index = _context11.sent;
+                index = _context12.sent;
 
-                _getFileContents = function _getFileContents(filePath) {
+                getFileContents = function getFileContents(filePath) {
                   var indexEntry = index.getByPath(getRelativePath(filePath), 0);
                   return indexEntry ? getBlobText(indexEntry.id, filePath) : null;
                 };
 
-                _context11.next = 14;
-                return _promise2.default.all(deltaFiles.map(_getFileContents).filter(Boolean));
+                _context12.next = 14;
+                return _promise2.default.all(deltaFiles.map(getFileContents).filter(Boolean));
 
               case 14:
-                _files = _context11.sent;
-                return _context11.abrupt('return', getLintResults(_files));
+                files = _context12.sent;
+                _context12.next = 17;
+                return getLintResults(files);
 
-              case 16:
+              case 17:
+                _results = _context12.sent;
+                return _context12.abrupt('return', [_results, _results]);
+
+              case 19:
                 if (!this.newRev.isWorkdir) {
-                  _context11.next = 18;
+                  _context12.next = 21;
                   break;
                 }
 
                 throw new Error("Not yet implemented: can't run diff with partially staged changes.");
 
-              case 18:
-                getFileContents = function () {
+              case 21:
+                getOldFileContents = function () {
                   var _ref14 = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee10(filePath) {
-                    var entry;
+                    var oldEntry;
                     return _regenerator2.default.wrap(function _callee10$(_context10) {
                       while (1) {
                         switch (_context10.prev = _context10.next) {
                           case 0:
-                            if (!(_this4.newCommit == null)) {
-                              _context10.next = 2;
-                              break;
-                            }
-
-                            throw new Error('Expected new commit to be non-null');
+                            _context10.next = 2;
+                            return _this4.oldCommit.getEntry(getRelativePath(filePath));
 
                           case 2:
-                            _context10.next = 4;
-                            return _this4.newCommit.getEntry(getRelativePath(filePath));
+                            oldEntry = _context10.sent;
+                            return _context10.abrupt('return', getBlobText(oldEntry.id(), filePath));
 
                           case 4:
-                            entry = _context10.sent;
-                            return _context10.abrupt('return', getBlobText(entry.id(), filePath));
-
-                          case 6:
                           case 'end':
                             return _context10.stop();
                         }
@@ -742,24 +786,64 @@ var DeltaLinter = function () {
                     }, _callee10, _this4);
                   }));
 
-                  return function getFileContents(_x15) {
+                  return function getOldFileContents(_x15) {
                     return _ref14.apply(this, arguments);
                   };
                 }();
 
-                _context11.next = 21;
-                return _promise2.default.all(deltaFiles.map(getFileContents));
+                getNewFileContents = function () {
+                  var _ref15 = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee11(filePath) {
+                    var newEntry;
+                    return _regenerator2.default.wrap(function _callee11$(_context11) {
+                      while (1) {
+                        switch (_context11.prev = _context11.next) {
+                          case 0:
+                            if (!(_this4.newCommit == null)) {
+                              _context11.next = 2;
+                              break;
+                            }
 
-              case 21:
-                files = _context11.sent;
-                return _context11.abrupt('return', getLintResults(files));
+                            throw new Error('Expected new commit to be non-null');
 
-              case 23:
+                          case 2:
+                            _context11.next = 4;
+                            return _this4.newCommit.getEntry(getRelativePath(filePath));
+
+                          case 4:
+                            newEntry = _context11.sent;
+                            return _context11.abrupt('return', getBlobText(newEntry.id(), filePath));
+
+                          case 6:
+                          case 'end':
+                            return _context11.stop();
+                        }
+                      }
+                    }, _callee11, _this4);
+                  }));
+
+                  return function getNewFileContents(_x16) {
+                    return _ref15.apply(this, arguments);
+                  };
+                }();
+
+                _context12.next = 25;
+                return _promise2.default.all(deltaFiles.map(getOldFileContents));
+
+              case 25:
+                oldFiles = _context12.sent;
+                _context12.next = 28;
+                return _promise2.default.all(deltaFiles.map(getNewFileContents));
+
+              case 28:
+                newFiles = _context12.sent;
+                return _context12.abrupt('return', _promise2.default.all([getLintResults(oldFiles), getLintResults(newFiles)]));
+
+              case 30:
               case 'end':
-                return _context11.stop();
+                return _context12.stop();
             }
           }
-        }, _callee11, this);
+        }, _callee12, this);
       }));
 
       function lintFiles(_x11) {
@@ -771,30 +855,34 @@ var DeltaLinter = function () {
   }, {
     key: 'lint',
     value: function () {
-      var _ref15 = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee12(delta) {
-        var deltaFiles, results;
-        return _regenerator2.default.wrap(function _callee12$(_context12) {
+      var _ref16 = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee13(delta) {
+        var deltaFiles, _ref17, _ref18, oldResults, newResults;
+
+        return _regenerator2.default.wrap(function _callee13$(_context13) {
           while (1) {
-            switch (_context12.prev = _context12.next) {
+            switch (_context13.prev = _context13.next) {
               case 0:
                 deltaFiles = [].concat((0, _toConsumableArray3.default)(delta.keys()));
-                _context12.next = 3;
+                _context13.next = 3;
                 return this.lintFiles(deltaFiles);
 
               case 3:
-                results = _context12.sent;
-                return _context12.abrupt('return', filterResults(results, delta));
+                _ref17 = _context13.sent;
+                _ref18 = (0, _slicedToArray3.default)(_ref17, 2);
+                oldResults = _ref18[0];
+                newResults = _ref18[1];
+                return _context13.abrupt('return', filterResults(oldResults, newResults, delta));
 
-              case 5:
+              case 8:
               case 'end':
-                return _context12.stop();
+                return _context13.stop();
             }
           }
-        }, _callee12, this);
+        }, _callee13, this);
       }));
 
-      function lint(_x16) {
-        return _ref15.apply(this, arguments);
+      function lint(_x17) {
+        return _ref16.apply(this, arguments);
       }
 
       return lint;

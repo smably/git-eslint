@@ -44,7 +44,7 @@ async function getLinesAdded(patch: Git.ConvenientPatch) {
   };
 }
 
-function filterResults(results, delta: Delta) {
+function filterResults(oldResults: LintResults, newResults: LintResults, delta: Delta) {
   const totals = {
     errorCount: 0,
     warningCount: 0,
@@ -54,17 +54,22 @@ function filterResults(results, delta: Delta) {
     filteredFixableWarningCount: 0,
   };
 
-  const filteredResults = results.map(fileResult => {
-    let filteredErrorCount = 0;
-    let filteredWarningCount = 0;
-    let filteredFixableErrorCount = 0;
-    let filteredFixableWarningCount = 0;
-
+  const filteredResults = newResults.map(fileResult => {
     const fileLinesAdded = delta.get(fileResult.filePath);
+    const oldFileResult = oldResults.find(o => o.filePath === fileResult.filePath);
 
     if (fileLinesAdded == null) {
       throw new Error(`Fatal: missing lint results for file ${fileResult.filePath}`);
     }
+
+    if (oldFileResult == null) {
+      throw new Error(`Fatal: couldn't find file in old lint results ${fileResult.filePath}`);
+    }
+
+    const filteredErrors = [];
+    const filteredWarnings = [];
+    let filteredFixableErrorCount = 0;
+    let filteredFixableWarningCount = 0;
 
     const isAddedLine = message => {
       if (fileLinesAdded.lineSet.has(message.line)) {
@@ -72,13 +77,13 @@ function filterResults(results, delta: Delta) {
       }
 
       if (message.severity === WARNING_SEVERITY) {
-        filteredWarningCount++;
+        filteredWarnings.push(message);
 
         if (message.fix) {
           filteredFixableWarningCount++;
         }
       } else if (message.severity === ERROR_SEVERITY) {
-        filteredErrorCount++;
+        filteredErrors.push(message);
 
         if (message.fix) {
           filteredFixableErrorCount++;
@@ -89,15 +94,50 @@ function filterResults(results, delta: Delta) {
     };
 
     const messages = fileLinesAdded === ALL_LINES ? fileResult.messages : fileResult.messages.filter(isAddedLine);
-    const errorCount = fileResult.errorCount - filteredErrorCount;
-    const warningCount = fileResult.warningCount - filteredWarningCount;
+
+    const isSameProblem = (message1, message2) =>
+      message1.ruleId === message2.ruleId && message1.source === message2.source && message1.column === message2.column;
+
+    const oldErrors = filteredErrors.filter(filteredError => {
+      if (!oldFileResult.messages.find(message => isSameProblem(message, filteredError))) {
+        messages.push(filteredError);
+
+        if (filteredError.fix) {
+          filteredFixableErrorCount--;
+        }
+
+        return false;
+      }
+
+      return true;
+    });
+
+    const oldWarnings = filteredWarnings.filter(filteredWarning => {
+      if (!oldFileResult.messages.find(message => isSameProblem(message, filteredWarning))) {
+        messages.push(filteredWarning);
+
+        if (filteredWarning.fix) {
+          filteredFixableWarningCount--;
+        }
+
+        return false;
+      }
+
+      return true;
+    });
+
+    const oldErrorCount = oldErrors.length;
+    const oldWarningCount = oldWarnings.length;
+
+    const errorCount = fileResult.errorCount - oldErrorCount;
+    const warningCount = fileResult.warningCount - oldWarningCount;
     const fixableErrorCount = fileResult.fixableErrorCount - filteredFixableErrorCount;
     const fixableWarningCount = fileResult.fixableWarningCount - filteredFixableWarningCount;
 
     totals.errorCount += errorCount;
     totals.warningCount += warningCount;
-    totals.filteredErrorCount += filteredErrorCount;
-    totals.filteredWarningCount += filteredWarningCount;
+    totals.filteredErrorCount += oldErrorCount;
+    totals.filteredWarningCount += oldWarningCount;
     totals.filteredFixableErrorCount += filteredFixableErrorCount;
     totals.filteredFixableWarningCount += filteredFixableWarningCount;
 
@@ -281,7 +321,7 @@ export default class DeltaLinter {
     if ((this.newRev.isIndex || this.newRev.isWorkdir) && !deltaHasPartiallyStagedFiles) {
       // Simple case: no partially staged files, so we can run ESLint directly on the filesystem
       const { results } = this.eslint.executeOnFiles(deltaFiles);
-      return results;
+      return [results, results];
     }
 
     if (this.newRev.isIndex) {
@@ -294,8 +334,9 @@ export default class DeltaLinter {
       };
 
       const files = await Promise.all(deltaFiles.map(getFileContents).filter(Boolean));
+      const results = await getLintResults(files);
 
-      return getLintResults(files);
+      return [results, results];
     }
 
     if (this.newRev.isWorkdir) {
@@ -307,24 +348,32 @@ export default class DeltaLinter {
       throw new Error("Not yet implemented: can't run diff with partially staged changes.");
     }
 
-    const getFileContents = async filePath => {
+    const getOldFileContents = async filePath => {
+      const oldEntry = await this.oldCommit.getEntry(getRelativePath(filePath));
+
+      return getBlobText(oldEntry.id(), filePath);
+    };
+
+    const getNewFileContents = async filePath => {
       if (this.newCommit == null) {
         throw new Error('Expected new commit to be non-null');
       }
 
-      const entry = await this.newCommit.getEntry(getRelativePath(filePath));
-      return getBlobText(entry.id(), filePath);
+      const newEntry = await this.newCommit.getEntry(getRelativePath(filePath));
+
+      return getBlobText(newEntry.id(), filePath);
     };
 
-    const files = await Promise.all(deltaFiles.map(getFileContents));
+    const oldFiles = await Promise.all(deltaFiles.map(getOldFileContents));
+    const newFiles = await Promise.all(deltaFiles.map(getNewFileContents));
 
-    return getLintResults(files);
+    return Promise.all([getLintResults(oldFiles), getLintResults(newFiles)]);
   }
 
   async lint(delta: Delta) {
     const deltaFiles = [...delta.keys()];
-    const results = await this.lintFiles(deltaFiles);
+    const [oldResults, newResults] = await this.lintFiles(deltaFiles);
 
-    return filterResults(results, delta);
+    return filterResults(oldResults, newResults, delta);
   }
 }

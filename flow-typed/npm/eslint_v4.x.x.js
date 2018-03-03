@@ -10,6 +10,7 @@ type LintResults = {
     line: number,
     column: number,
     nodeType: string,
+    source: string,
     fix: { range: [number, number], text: string }
   }[],
   errorCount: number,
